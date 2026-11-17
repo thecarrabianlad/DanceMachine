@@ -11,10 +11,13 @@ Tips
 - Stand 2-3 m from the webcam so head-to-feet is visible, with good light.
 - Gameplay runs in 2 separate windows (Dancer video & Your Camera) so you can resize or move them to separate screens/TVs.
 - First run of a video analyses it once (progress bar); later runs start instantly.
-- 3D Rhythm Scoring:
-  * Uses 3D world landmarks (perspective and tilt invariant).
-  * Dynamic Motion Weighting: Limbs actively moving in the choreography count up to 5x more than stationary limbs.
-  * Rhythm Timing: Awards bonus points for hitting poses on beat, with feedback like "PERFECT!", "GREAT (LATE)", "GREAT (EARLY)", etc.
+- Scoring:
+  * Uses 3D world landmarks and analyzes every reference frame on the first run.
+  * Moving limbs get more weight. Sustained whole-body stillness scores zero during reference movement; stepping and body translation count as movement.
+  * Frames where pose tracking fails count as misses instead of being omitted from the session average.
+  * The final score is hit rate: every evaluated pose at 50/100 similarity or higher earns one point; lower matches, stillness, and tracking failures earn zero.
+  * The app matches a short phrase to auto-align up to three seconds of start delay, then follows that phase over time.
+  * Feedback shows pose and timing judgements such as "PERFECT!", "LATE", and "OFF BEAT".
   * Skeleton Colors: Green (accurate), Yellow (close), Red (miss). Glowing points indicate active moving limbs.
 - Camera is mirrored like a real mirror. If the dancer in the video faces
   AWAY from you, run with --no-mirror.

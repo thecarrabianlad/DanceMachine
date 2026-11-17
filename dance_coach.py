@@ -44,8 +44,14 @@ SEGMENTS = [
 ]
 FULL_MARK_DEG = 8        # error below this = full points for a segment
 ZERO_MARK_DEG = 45       # error above this = 0 points
-SYNC_WINDOW_SEC = 0.12   # forgiveness for timing search (+/- seconds)
+SYNC_WINDOW_SEC = 0.08   # small alignment tolerance; avoid hiding timing errors
 VIS_MIN = 0.5
+STILL_WINDOW = 8         # compare poses across several camera frames to reject jitter
+STILL_BODY_MOTION = 0.035  # body-scale displacement threshold over STILL_WINDOW
+HIT_THRESHOLD = 50       # minimum similarity that earns a move hit and combo credit
+MAX_LAG_SEC = 3.0        # auto-align users who start a few seconds after the reference
+ALIGN_HISTORY = 18       # require a short movement phrase before locking alignment
+ALIGN_RECHECK = 6
 
 mp_pose = mp.solutions.pose
 
@@ -90,6 +96,69 @@ def segment_vectors(world_lm, screen_lm=None, vis_min=VIS_MIN):
                     vecs[i] = d / norm
                     ok[i] = True
     return vecs, ok
+
+
+def body_motion(current, previous):
+    """Return robust landmark displacement, normalized by torso length.
+    Retains whole-body translation, so stepping in place counts as movement.
+    """
+    if current is None or previous is None:
+        return None
+    tracked = np.array([11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28])
+    common = (current[tracked, 2] >= VIS_MIN) & (previous[tracked, 2] >= VIS_MIN)
+    if common.sum() < 4:
+        return None
+    torso_now = (np.linalg.norm(current[11, :2] - current[23, :2]) +
+                 np.linalg.norm(current[12, :2] - current[24, :2])) * 0.5
+    torso_old = (np.linalg.norm(previous[11, :2] - previous[23, :2]) +
+                 np.linalg.norm(previous[12, :2] - previous[24, :2])) * 0.5
+    scale = max(1e-4, (torso_now + torso_old) * 0.5)
+    shift = np.linalg.norm(current[tracked[common], :2] - previous[tracked[common], :2], axis=1) / scale
+    return float(np.percentile(shift, 75))
+
+
+def pose_similarity(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights):
+    """Score one pose without timing, for sequence-based phase alignment."""
+    both = user_ok & ref_valid
+    if both.sum() < 4:
+        return None
+    dots = np.clip((user_vecs[both] * ref_vecs[both]).sum(axis=-1), -1.0, 1.0)
+    err = np.degrees(np.arccos(dots))
+    points = np.clip(1.0 - (np.maximum(0.0, err - 8.0) / 37.0) ** 1.6, 0.0, 1.0)
+    weights = ref_weights[both]
+    return float((points * weights).sum() / max(1e-6, weights.sum()) * 100.0)
+
+
+def estimate_lag(history, ref_vecs, ref_valid, ref_weights, fps):
+    """Find a stable time offset by matching a phrase, not one lucky pose."""
+    changes = []
+    for (_, prev_vecs, prev_ok), (_, curr_vecs, curr_ok) in zip(history, history[1:]):
+        both = prev_ok & curr_ok
+        if both.any():
+            dots = np.clip((prev_vecs[both] * curr_vecs[both]).sum(axis=-1), -1.0, 1.0)
+            changes.extend(np.degrees(np.arccos(dots)).tolist())
+    if not changes or float(np.percentile(changes, 75)) < 3.0:
+        return None
+    max_lag = int(MAX_LAG_SEC * fps)
+    step = max(1, int(round(fps * 0.08)))
+    best_lag, best_score = None, -1.0
+    for lag in range(-max_lag, max_lag + 1, step):
+        vals = []
+        for ref_pos, user_vecs, user_ok in history:
+            j = ref_pos - lag
+            if 0 <= j < len(ref_vecs):
+                score = pose_similarity(user_vecs, user_ok, ref_vecs[j], ref_valid[j], ref_weights[j])
+                if score is not None:
+                    vals.append(score)
+        coverage = len(vals) / len(history)
+        if coverage < 0.7:
+            continue
+        score = float(np.mean(vals)) * coverage
+        if score > best_score:
+            best_lag, best_score = lag, score
+    if best_score < 35.0:
+        return None
+    return float(best_lag)
 
 
 def compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, fps):
@@ -143,7 +212,7 @@ def compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, f
 def analyse_reference(path, canvas):
     """Run 3D pose detection and motion velocity analysis on the reference video (cached)."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    key = f"{os.path.basename(path)}_{os.path.getsize(path)}_rhythm_v1.npz"
+    key = f"{os.path.basename(path)}_{os.path.getsize(path)}_rhythm_v2.npz"
     cache = os.path.join(CACHE_DIR, key)
     if os.path.exists(cache):
         d = np.load(cache)
@@ -253,8 +322,8 @@ def judgement(score, timing_tag="ON BEAT"):
             return "GREAT!", (0, 230, 0)
         else:
             return f"GOOD ({timing_tag})", (255, 210, 0)
-    if score >= 55:
-        return "OK", (255, 200, 0)
+    if score >= HIT_THRESHOLD:
+        return "HIT", (255, 200, 0)
     if score >= 35:
         return "BAD", (80, 120, 255)
     return "MISS", (60, 60, 255)
@@ -272,7 +341,7 @@ def draw_hud(img, title, avg, label, combo, shown_score):
     # Header background bar
     cv2.rectangle(img, (0, 0), (w, 54), (25, 25, 25), -1)
     # Average score on left
-    text(img, f"SCORE {avg:5.1f}", (15, 36), 0.85, (0, 255, 255), 2)
+    text(img, f"HIT RATE {avg:5.1f}%", (15, 36), 0.85, (0, 255, 255), 2)
     # Judgement label centered
     if label and label[0]:
         tw = cv2.getTextSize(label[0], cv2.FONT_HERSHEY_SIMPLEX, 0.95, 2)[0][0]
@@ -397,11 +466,14 @@ def play(path, cam, mirror):
     audio = Audio(path)
     start = time.time()
     ref_pos, ref_frame = -1, None
-    scores, recent = [], []
+    scores = []
     combo = best_combo = 0
     shown_score, label = 0.0, ("", (255, 255, 255))
     err, matched = None, None
-    prev_user_vecs = None
+    user_history = []
+    pose_history = []
+    alignment_checks = 0
+    lag_frames = None
 
     with mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5,
                       min_tracking_confidence=0.5) as pose:
@@ -431,33 +503,73 @@ def play(path, cam, mirror):
 
             active_weights = ref_weights[ref_pos] if (0 <= ref_pos < len(ref_weights)) else None
 
-            if screen_lm is not None and ref_pos < len(ref_vecs) and ref_valid[ref_pos].sum() >= 4:
+            if screen_lm is not None and ref_pos < len(ref_vecs):
                 user_vecs, user_ok = segment_vectors(world_lm, screen_lm)
-                match_res = compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, ref_pos, win, fps)
+                pose_history.append((ref_pos, user_vecs.copy(), user_ok.copy()))
+                pose_history = pose_history[-ALIGN_HISTORY:]
+                alignment_checks += 1
+                if lag_frames is None and len(pose_history) == ALIGN_HISTORY and alignment_checks % ALIGN_RECHECK == 0:
+                    lag_frames = estimate_lag(pose_history, ref_vecs, ref_valid, ref_weights, fps)
+                aligning = lag_frames is None
+                center = ref_pos if aligning else int(round(ref_pos - lag_frames))
+                match_res = None if aligning else compare(
+                    user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, fps)
                 if match_res:
                     raw, err, matched, tag, dt = match_res
-                    # Motion deficit: penalize if reference expects movement but user is still
-                    if prev_user_vecs is not None and active_weights is not None:
-                        dots_u = np.clip((user_vecs * prev_user_vecs).sum(axis=-1), -1.0, 1.0)
-                        user_vel = np.degrees(np.arccos(dots_u))
-                        expected_motion = np.clip((active_weights - 1.0) / 4.0, 0.0, 1.0)
-                        actual_motion = np.clip(user_vel / 4.0, 0.0, 1.0)
-                        motion_match = np.where(expected_motion > 0.2,
-                                                np.clip(actual_motion / (expected_motion + 0.05), 0.0, 1.0),
-                                                1.0)
-                        motion_factor = 0.5 + 0.5 * motion_match[user_ok].mean()
-                        raw = raw * motion_factor
-                    prev_user_vecs = user_vecs.copy()
-                    recent = (recent + [raw])[-3:]
-                    smooth = sum(recent) / len(recent)
-                    scores.append(smooth)
-                    shown_score += (smooth - shown_score) * 0.25
-                    label = judgement(smooth, tag)
-                    combo = combo + 1 if smooth >= 75 else 0
-                    best_combo = max(best_combo, combo)
+                    matched_ref_pos = int(np.clip(round(center + dt * fps), 0, len(ref_weights) - 1))
+                    active_weights = ref_weights[matched_ref_pos]
+                    # Track motion over a longer interval so detector jitter does not count
+                    # as dancing. If the reference is moving and the user is still, score 0.
+                    user_history.append(screen_lm.copy())
+                    user_history = user_history[-STILL_WINDOW:]
+                    expected = active_weights
+                    if len(user_history) >= STILL_WINDOW and expected is not None:
+                        motion = body_motion(screen_lm, user_history[0])
+                        expected_active = expected > 1.6
+                        # Establish the choreography offset once the user actually moves.
+                        # Thereafter follow it gradually, preventing frame-by-frame pose cherry-picking.
+                        if motion is not None and motion >= STILL_BODY_MOTION and lag_frames is not None:
+                            lag_frames = float(np.clip(lag_frames - dt * fps * 0.2,
+                                                       -MAX_LAG_SEC * fps,
+                                                       MAX_LAG_SEC * fps))
+                        if expected_active.any() and motion is not None:
+                            if motion < STILL_BODY_MOTION:
+                                raw = 0.0
+                            else:
+                                raw *= float(np.clip(motion / (STILL_BODY_MOTION * 2.5), 0.0, 1.0))
+                    if lag_frames is None:
+                        label = ("ALIGNING", (0, 220, 255))
+                        combo = 0
+                    else:
+                        # Session score is hit rate: each evaluated pose earns one point
+                        # at 50% similarity, rather than averaging similarity magnitudes.
+                        hit = raw >= HIT_THRESHOLD
+                        point_score = 100.0 if hit else 0.0
+                        scores.append(point_score)
+                        shown_score += (point_score - shown_score) * 0.25
+                        label = judgement(raw, tag)
+                        combo = combo + 1 if hit else 0
+                        best_combo = max(best_combo, combo)
+                else:
+                    if lag_frames is None:
+                        label = ("ALIGNING", (0, 220, 255))
+                    else:
+                        scores.append(0.0)
+                        combo = 0
+                        shown_score += (0.0 - shown_score) * 0.25
+                        label = judgement(0.0)
                 draw_user_skeleton(cam_img, screen_lm, err, matched, active_weights) if err is not None else None
-            elif screen_lm is None:
-                text(cam_img, "No body detected - step back", (20, 95), 0.7, (80, 80, 255))
+            else:
+                # Count missed tracking as misses; excluding these frames inflates the final grade.
+                if screen_lm is not None and lag_frames is None:
+                    label = ("ALIGNING", (0, 220, 255))
+                else:
+                    scores.append(0.0)
+                    combo = 0
+                    shown_score += (0.0 - shown_score) * 0.25
+                    label = judgement(0.0)
+                if screen_lm is None:
+                    text(cam_img, "No body detected - step back", (20, 95), 0.7, (80, 80, 255))
 
             if ref_frame is not None:
                 ref_img = fit_height(ref_frame, PANEL_H)
@@ -487,7 +599,7 @@ def result_screen(scores, best_combo):
         img = np.zeros((520, 900, 3), np.uint8)
         text(img, "RESULTS", (40, 80), 1.4, (0, 220, 255), 3)
         text(img, f"Grade: {g}", (40, 190), 2.6, (0, 255, 120), 5)
-        text(img, f"Score: {avg:.1f} / 100", (40, 270), 1.0)
+        text(img, f"Hit rate: {avg:.1f}%", (40, 270), 1.0)
         text(img, f"Best combo: {best_combo}", (40, 320), 1.0)
         text(img, "R = retry     M = menu     Q = quit", (40, 450), 0.8, (180, 180, 180), 1)
         cv2.imshow(WINDOW, img)
