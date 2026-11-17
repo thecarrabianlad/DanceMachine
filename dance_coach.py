@@ -121,7 +121,7 @@ def analyse_reference(path, canvas):
                 valid.append(v)
             n += 1
             if n % 5 == 0:
-                img = np.zeros((300, 800, 3), np.uint8)
+                img = backdrop(300, 800)
                 text(img, "Analysing dance video (one time only)...", (40, 120), 0.9)
                 bar = int(720 * n / total)
                 cv2.rectangle(img, (40, 170), (760, 200), (80, 80, 80), 2)
@@ -136,6 +136,75 @@ def analyse_reference(path, canvas):
 
 
 # --------------------------------------------------------------- drawing
+# OpenCV uses BGR colors. Keep the visual theme shared across screens.
+CYAN = (240, 215, 0)
+PINK = (155, 45, 245)
+GOLD = (30, 215, 255)
+MUTED = (160, 175, 185)
+
+
+def backdrop(h, w):
+    img = np.full((h, w, 3), (17, 12, 9), np.uint8)
+    for y in range(0, h, 32):
+        cv2.line(img, (0, y), (w, y), (27, 23, 16), 1)
+    for x in range(0, w, 64):
+        cv2.line(img, (x, 0), (x, h), (24, 20, 14), 1)
+    return img
+
+
+def frame(img, x, y, w, h, color):
+    cut = min(14, w // 5, h // 5)
+    points = np.array([(x + cut, y), (x + w - cut, y),
+                       (x + w, y + cut), (x + w, y + h - cut),
+                       (x + w - cut, y + h), (x + cut, y + h),
+                       (x, y + h - cut), (x, y + cut)], np.int32)
+    cv2.polylines(img, [points], True, tuple(c // 4 for c in color), 6, cv2.LINE_AA)
+    cv2.polylines(img, [points], True, color, 1, cv2.LINE_AA)
+    cv2.line(img, (x + cut, y), (x + min(w // 3, 90), y), color, 3, cv2.LINE_AA)
+
+
+def dashboard(ref_img, cam_img, avg, label, combo, shown_score, tracking, elapsed, duration):
+    # Equal panels letterbox each source so portrait videos retain their full pose.
+    panel_w, panel_h = 640, PANEL_H
+    img = backdrop(744, 1336)
+    cards = [(20, 230, CYAN), (266, 338, CYAN),
+             (620, 370, GOLD), (1006, 310, PINK)]
+    for x, w, color in cards:
+        frame(img, x, 20, w, 100, color)
+    text(img, "DANCE", (42, 62), 1.1, CYAN, 2)
+    text(img, "COACH", (42, 101), 1.1, CYAN, 2)
+    text(img, "SCORE", (286, 47), 0.55, CYAN)
+    text(img, f"{avg:04.1f}", (286, 99), 1.65, CYAN, 3)
+    text(img, "/ 100", (464, 96), 0.85, MUTED)
+    text(img, label[0] or "GET READY", (646, 84), 1.25, GOLD, 3)
+    text(img, "COMBO", (1028, 47), 0.55, PINK)
+    text(img, str(combo), (1028, 100), 1.65, PINK, 3)
+    cv2.rectangle(img, (20, 136), (1316, 148), (49, 40, 31), -1)
+    fill = int(1296 * np.clip(shown_score / 100, 0, 1))
+    if fill:
+        cv2.rectangle(img, (20, 136), (20 + fill, 148), CYAN, -1)
+    status = "POSE TRACKING" if tracking else "POSE NOT DETECTED"
+    text(img, "CAMERA CONNECTED", (200, 180), 0.55, CYAN, 1)
+    text(img, status, (550, 180), 0.55, CYAN if tracking else PINK, 1)
+    text(img, "LIVE SESSION", (940, 180), 0.55, MUTED, 1)
+    for source, x, title, color in ((ref_img, 20, "DANCER / REFERENCE", CYAN),
+                                    (cam_img, 676, "YOU / LIVE CAMERA", PINK)):
+        text(img, title, (x + 14, 216), 0.65, color)
+        scale = min(panel_w / source.shape[1], panel_h / source.shape[0])
+        fitted = cv2.resize(source, (max(1, int(source.shape[1] * scale)),
+                                     max(1, int(source.shape[0] * scale))))
+        y = 230 + (panel_h - fitted.shape[0]) // 2
+        left = x + (panel_w - fitted.shape[1]) // 2
+        img[y:y + fitted.shape[0], left:left + fitted.shape[1]] = fitted
+        frame(img, x, 230, panel_w, panel_h, color)
+    def timestamp(seconds):
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+    text(img, f"{timestamp(elapsed)} / {timestamp(duration)}", (34, 734), 0.5, MUTED, 1)
+    text(img, "Q / ESC  EXIT", (1134, 734), 0.5, MUTED, 1)
+    return img
+
+
 def text(img, s, org, scale=0.7, color=(255, 255, 255), thick=2):
     cv2.putText(img, s, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick + 3, cv2.LINE_AA)
     cv2.putText(img, s, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
@@ -155,8 +224,8 @@ def draw_user_skeleton(img, lm, err, matched):
             continue
         col = (200, 200, 200)
         if err is not None and matched[k]:
-            col = (0, 220, 0) if err[k] <= 30 else (0, 0, 255)
-        cv2.line(img, pt(a), pt(b), col, 5, cv2.LINE_AA)
+            col = (150, 255, 40) if err[k] <= 30 else PINK
+        cv2.line(img, pt(a), pt(b), col, 3, cv2.LINE_AA)
         cv2.circle(img, pt(a), 6, (255, 255, 255), -1)
         cv2.circle(img, pt(b), 6, (255, 255, 255), -1)
 
@@ -194,13 +263,13 @@ class Audio:
 def menu(videos):
     sel = 0
     while True:
-        img = np.zeros((520, 900, 3), np.uint8)
-        text(img, "DANCE COACH", (40, 70), 1.4, (0, 220, 255), 3)
+        img = backdrop(520, 900)
+        text(img, "DANCE COACH", (40, 70), 1.4, CYAN, 3)
         text(img, "Up/Down + Enter to choose   |   Q to quit", (40, 110), 0.6, (180, 180, 180), 1)
         if not videos:
             text(img, f"Put dance videos (.mp4) in: {VIDEO_DIR}", (40, 220), 0.7, (80, 80, 255))
         for i, v in enumerate(videos[:10]):
-            col = (0, 255, 120) if i == sel else (220, 220, 220)
+            col = CYAN if i == sel else MUTED
             text(img, ("> " if i == sel else "  ") + os.path.basename(v), (60, 170 + i * 34), 0.8, col)
         cv2.imshow(WINDOW, img)
         k = cv2.waitKeyEx(50)
@@ -280,16 +349,9 @@ def play(path, cam, mirror):
                 text(cam_img, "No body detected - step back", (20, 80), 0.7, (80, 80, 255))
 
             ref_img = fit_height(ref_frame, PANEL_H)
-            canvas = np.hstack([ref_img, cam_img])
-            H, W = canvas.shape[:2]
-            cv2.rectangle(canvas, (0, 0), (W, 56), (25, 25, 25), -1)
             avg = sum(scores) / len(scores) if scores else 0
-            text(canvas, f"SCORE {avg:5.1f}", (15, 38), 0.95, (0, 255, 255))
-            text(canvas, label[0], (W // 2 - 80, 38), 1.0, label[1], 3)
-            text(canvas, f"COMBO {combo}", (W - 230, 38), 0.9, (255, 255, 255))
-            text(canvas, "DANCER", (10, H - 12), 0.6, (200, 200, 200), 1)
-            text(canvas, "YOU", (ref_img.shape[1] + 10, H - 12), 0.6, (200, 200, 200), 1)
-            cv2.rectangle(canvas, (0, 56), (int(W * min(1, shown_score / 100)), 64), (0, 220, 120), -1)
+            canvas = dashboard(ref_img, cam_img, avg, label, combo,
+                               shown_score, lm is not None, t, len(angles) / fps)
             cv2.imshow(WINDOW, canvas)
             if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                 audio.stop()
@@ -300,9 +362,9 @@ def result_screen(scores, best_combo):
     avg = sum(scores) / len(scores) if scores else 0
     g = grade(avg)
     while True:
-        img = np.zeros((520, 900, 3), np.uint8)
-        text(img, "RESULTS", (40, 80), 1.4, (0, 220, 255), 3)
-        text(img, f"Grade: {g}", (40, 190), 2.6, (0, 255, 120), 5)
+        img = backdrop(520, 900)
+        text(img, "RESULTS", (40, 80), 1.4, CYAN, 3)
+        text(img, f"Grade: {g}", (40, 190), 2.6, PINK, 5)
         text(img, f"Score: {avg:.1f} / 100", (40, 270), 1.0)
         text(img, f"Best combo: {best_combo}", (40, 320), 1.0)
         text(img, "R = retry     M = menu     Q = quit", (40, 450), 0.8, (180, 180, 180), 1)
