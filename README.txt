@@ -16,7 +16,7 @@ Tips
   * Moving limbs get more weight. Sustained whole-body stillness scores zero during reference movement; stepping and body translation count as movement.
   * Frames where pose tracking fails count as misses instead of being omitted from the session average.
   * The final score is hit rate: every evaluated pose at 50/100 similarity or higher earns one point; lower matches, stillness, and tracking failures earn zero.
-  * The app matches a short phrase to auto-align up to three seconds of start delay, then follows that phase over time.
+  * The app matches a short phrase to auto-align up to six seconds of start delay, then tracks gradual tempo drift.
   * Feedback shows pose and timing judgements such as "PERFECT!", "LATE", and "OFF BEAT".
   * Skeleton Colors: Green (accurate), Yellow (close), Red (miss). Glowing points indicate active moving limbs.
 - Camera is mirrored like a real mirror. If the dancer in the video faces
