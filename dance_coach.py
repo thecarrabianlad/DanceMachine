@@ -45,7 +45,7 @@ SEGMENTS = [
 FULL_MARK_DEG = 8        # error below this = full points for a segment
 ZERO_MARK_DEG = 45       # error above this = 0 points
 SYNC_WINDOW_SEC = 0.50   # follow gradual tempo drift while preserving phase continuity
-VIS_MIN = 0.5
+VIS_MIN = 0.35
 STILL_WINDOW = 8         # compare poses across several camera frames to reject jitter
 STILL_BODY_MOTION = 0.035  # body-scale displacement threshold over STILL_WINDOW
 HIT_THRESHOLD = 50       # minimum similarity that earns a move hit and combo credit
@@ -224,8 +224,8 @@ def analyse_reference(path, canvas):
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
     vecs, valid = [], []
 
-    with mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5,
-                      min_tracking_confidence=0.5) as pose:
+    with mp_pose.Pose(model_complexity=1, min_detection_confidence=0.4,
+                      min_tracking_confidence=0.4) as pose:
         n = 0
         while True:
             ok, frame = cap.read()
@@ -476,8 +476,8 @@ def play(path, cam, mirror):
     alignment_checks = 0
     lag_frames = None
 
-    with mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5,
-                      min_tracking_confidence=0.5) as pose:
+    with mp_pose.Pose(model_complexity=1, min_detection_confidence=0.4,
+                      min_tracking_confidence=0.4) as pose:
         while True:
             t = time.time() - start
             target = int(t * fps)
@@ -560,7 +560,8 @@ def play(path, cam, mirror):
                         combo = 0
                         shown_score += (0.0 - shown_score) * 0.25
                         label = judgement(0.0)
-                draw_user_skeleton(cam_img, screen_lm, err, matched, active_weights) if err is not None else None
+                # Keep showing detected landmarks while phrase alignment is being established.
+                draw_user_skeleton(cam_img, screen_lm, err, matched, active_weights)
             else:
                 # Count missed tracking as misses; excluding these frames inflates the final grade.
                 if screen_lm is not None and lag_frames is None:
