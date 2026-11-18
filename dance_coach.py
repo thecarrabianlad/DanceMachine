@@ -44,14 +44,15 @@ SEGMENTS = [
 ]
 FULL_MARK_DEG = 8        # error below this = full points for a segment
 ZERO_MARK_DEG = 45       # error above this = 0 points
-SYNC_WINDOW_SEC = 0.08   # small alignment tolerance; avoid hiding timing errors
+SYNC_WINDOW_SEC = 0.50   # follow gradual tempo drift while preserving phase continuity
 VIS_MIN = 0.5
 STILL_WINDOW = 8         # compare poses across several camera frames to reject jitter
 STILL_BODY_MOTION = 0.035  # body-scale displacement threshold over STILL_WINDOW
 HIT_THRESHOLD = 50       # minimum similarity that earns a move hit and combo credit
-MAX_LAG_SEC = 3.0        # auto-align users who start a few seconds after the reference
+MAX_LAG_SEC = 6.0        # auto-align users who start late or dance at a different tempo
 ALIGN_HISTORY = 18       # require a short movement phrase before locking alignment
 ALIGN_RECHECK = 6
+ALIGN_MOTION_DEG = 2.0   # allow small, slower movements to establish alignment
 
 mp_pose = mp.solutions.pose
 
@@ -137,7 +138,7 @@ def estimate_lag(history, ref_vecs, ref_valid, ref_weights, fps):
         if both.any():
             dots = np.clip((prev_vecs[both] * curr_vecs[both]).sum(axis=-1), -1.0, 1.0)
             changes.extend(np.degrees(np.arccos(dots)).tolist())
-    if not changes or float(np.percentile(changes, 75)) < 3.0:
+    if not changes or float(np.percentile(changes, 75)) < ALIGN_MOTION_DEG:
         return None
     max_lag = int(MAX_LAG_SEC * fps)
     step = max(1, int(round(fps * 0.08)))
@@ -190,14 +191,14 @@ def compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, f
         if abs_dt <= 0.04:
             timing_mult = 1.0
             tag = "ON BEAT"
-        elif abs_dt <= 0.08:
-            timing_mult = 0.82
+        elif abs_dt <= 0.25:
+            timing_mult = 0.98
             tag = "LATE" if delta_t < 0 else "EARLY"
-        elif abs_dt <= 0.12:
-            timing_mult = 0.60
+        elif abs_dt <= 0.50:
+            timing_mult = 0.95
             tag = "TOO LATE" if delta_t < 0 else "TOO EARLY"
         else:
-            timing_mult = 0.40
+            timing_mult = 0.90
             tag = "OFF BEAT"
 
         final_score = pose_score * timing_mult
@@ -529,7 +530,8 @@ def play(path, cam, mirror):
                         # Establish the choreography offset once the user actually moves.
                         # Thereafter follow it gradually, preventing frame-by-frame pose cherry-picking.
                         if motion is not None and motion >= STILL_BODY_MOTION and lag_frames is not None:
-                            lag_frames = float(np.clip(lag_frames - dt * fps * 0.2,
+                            lag_adjustment = float(np.clip(dt, -0.12, 0.12) * fps * 0.12)
+                            lag_frames = float(np.clip(lag_frames - lag_adjustment,
                                                        -MAX_LAG_SEC * fps,
                                                        MAX_LAG_SEC * fps))
                         if expected_active.any() and motion is not None:
