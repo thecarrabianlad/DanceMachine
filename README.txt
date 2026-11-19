@@ -9,7 +9,7 @@ DANCE COACH - runs fully offline on your PC
 
 Tips
 - Stand 2-3 m from the webcam so head-to-feet is visible, with good light.
-- Gameplay runs in 2 separate windows (Dancer video & Your Camera) so you can resize or move them to separate screens/TVs.
+- Gameplay shows the dancer and webcam side by side in fullscreen.
 - First run of a video analyses it once (progress bar); later runs start instantly.
 - Scoring:
   * Uses 3D world landmarks and analyzes every reference frame on the first run.

@@ -9,6 +9,8 @@ Run:   python dance_coach.py            (shows a menu of videos in ./videos)
 Options: --camera 1   use another webcam
          --no-mirror  don't mirror the camera (use if the dancer faces away)
 """
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageSequence
+from functools import lru_cache
 import argparse
 import math
 import os
@@ -219,6 +221,7 @@ def analyse_reference(path, canvas):
         d = np.load(cache)
         return d["vecs"], d["valid"], d["weights"], float(d["fps"])
 
+    fullscreen()
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
@@ -245,7 +248,7 @@ def analyse_reference(path, canvas):
                 cv2.rectangle(img, (40, 170), (40 + bar, 200), (0, 220, 120), -1)
                 pct = int(100 * n / total)
                 text(img, f"{pct}%", (700, 155), 0.65, (200, 200, 200), 1)
-                cv2.imshow(WINDOW, img)
+                show_fullscreen(img)
                 if (cv2.waitKey(1) & 0xFF == 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     sys.exit(0)
 
@@ -331,7 +334,7 @@ def judgement(score, timing_tag="ON BEAT"):
 
 
 def grade(avg):
-    for g, t in (("S", 92), ("A", 80), ("B", 65), ("C", 50), ("D", 35)):
+    for g, t in (("S", 92), ("A", 80), ("B", 65), ("C", 50), ("D", 35), ("E", 20)):
         if avg >= t:
             return g
     return "F"
@@ -340,9 +343,9 @@ def grade(avg):
 def draw_hud(img, title, avg, label, combo, shown_score):
     h, w = img.shape[:2]
     # Header background bar
-    cv2.rectangle(img, (0, 0), (w, 54), (25, 25, 25), -1)
+    cv2.rectangle(img, (0, 0), (w, 54), INK, -1)
     # Average score on left
-    text(img, f"HIT RATE {avg:5.1f}%", (15, 36), 0.85, (0, 255, 255), 2)
+    text(img, f"HIT RATE {avg:5.1f}%", (15, 36), 0.85, GOLD, 2)
     # Judgement label centered
     if label and label[0]:
         tw = cv2.getTextSize(label[0], cv2.FONT_HERSHEY_SIMPLEX, 0.95, 2)[0][0]
@@ -355,7 +358,7 @@ def draw_hud(img, title, avg, label, combo, shown_score):
     cv2.rectangle(img, (0, 54), (w, 60), (45, 45, 45), -1)
     meter_w = int(w * min(1.0, max(0.0, shown_score / 100.0)))
     if meter_w > 0:
-        cv2.rectangle(img, (0, 54), (meter_w, 60), (0, 220, 120), -1)
+        cv2.rectangle(img, (0, 54), (meter_w, 60), LIME, -1)
     # Title badge bottom left
     text(img, title, (15, h - 14), 0.65, (200, 200, 200), 1)
 
@@ -376,40 +379,181 @@ class Audio:
 
 
 # ------------------------------------------------------------------ screens
+CYAN = (235, 222, 35)
+PINK = (185, 53, 255)
+WHITE = (225, 246, 255)
+INK = (43, 21, 38)
+LIME = (51, 241, 177)
+GOLD = (38, 213, 255)
+ORANGE = (65, 114, 255)
+BUTTON_COLORS = {"previous": CYAN, "next": PINK, "play": LIME,
+                 "retry": GOLD, "menu": CYAN, "quit": ORANGE}
+
+
+def panel(title):
+    img = np.full((540, 960, 3), INK, np.uint8)
+    for offset, color in [(0, PINK), (32, GOLD), (64, LIME)]:
+        x = 808 + offset
+        cv2.fillConvexPoly(img, np.int32([(x, 0), (x+23, 0), (x-10, 58), (x-33, 58)]), color)
+    text(img, "DANCE COACH", (36, 36), .55, CYAN)
+    text(img, title, (32, 98), 1.65, GOLD, 3)
+    cv2.line(img, (35, 113), (923, 113), PINK, 2)
+    return img
+
+
+@lru_cache(maxsize=24)
+def button_art(label, width, height):
+    font_path = os.path.join(HERE, "assets", "fonts", "Drobix.ttf")
+    mask = Image.new("L", (width, height))
+    draw = ImageDraw.Draw(mask)
+    for size in range(40, 9, -1):
+        font = ImageFont.truetype(font_path, size)
+        left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+        if right-left <= width-18 and bottom-top <= height-10:
+            break
+    pos = ((width-right+left)//2-left, (height-bottom+top)//2-top)
+    draw.text(pos, label, font=font, fill=255)
+    alpha = np.asarray(mask)[:, :, None]/255.
+    return alpha
+
+
+def control(img, box, label, active=False):
+    x, y, w, h = box
+    paint = BUTTON_COLORS[label.split()[0].lower()]
+    cv2.rectangle(img, (x,y), (x+w,y+h), paint, -1)
+    cv2.rectangle(img, (x,y), (x+w,y+h), WHITE if active else INK, 2)
+    alpha = button_art(label, w, h)
+    region = img[y:y+h,x:x+w]
+    shadow = np.roll(alpha, (2,2), axis=(0,1))
+    region[:] = region*(1-shadow)+np.array(WHITE)*shadow
+    region[:] = region*(1-alpha)+np.array(INK)*alpha
+
+
+def fullscreen():
+    global display_size
+    from tkinter import Tk
+    probe = Tk()
+    probe.withdraw()
+    display_size = (probe.winfo_screenwidth(), probe.winfo_screenheight())
+    probe.destroy()
+    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO | cv2.WINDOW_GUI_NORMAL)
+    cv2.resizeWindow(WINDOW, *display_size)
+    cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+
+def show_fullscreen(frame):
+    cv2.imshow(WINDOW, cv2.resize(frame, display_size))
+    return display_size
+
+
+def screen_input(render, animation=None):
+    fullscreen()
+    hovered = pressed = None
+    pointer = None
+    actions = []
+    img, targets = render()
+
+    def target_at_pointer():
+        if pointer is None:
+            return None
+        px = pointer[0] * img.shape[1] // display_size[0]
+        py = pointer[1] * img.shape[0] // display_size[1]
+        for (x, y, w, h), action in targets:
+            if x <= px < x+w and y <= py < y+h:
+                return action
+        return None
+
+    def mouse(event, x, y, flags, data):
+        nonlocal pointer, hovered, pressed
+        pointer = (x, y)
+        hovered = target_at_pointer()
+        if event == cv2.EVENT_LBUTTONDOWN:
+            pressed = hovered
+        elif event == cv2.EVENT_LBUTTONUP:
+            if pressed is not None and pressed == hovered:
+                actions.append(pressed)
+            pressed = None
+
+    cv2.setMouseCallback(WINDOW, mouse)
+    try:
+        last_state = None
+        while True:
+            index = animation[0]() if animation else None
+            state = (hovered, pressed, index)
+            if state != last_state:
+                frame = img.copy()
+                if animation:
+                    _, frames, position = animation
+                    tile = frames[index]
+                    x, y = position
+                    frame[y:y+tile.shape[0], x:x+tile.shape[1]] = tile
+                for (x, y, w, h), action in targets:
+                    if hovered == action:
+                        down = pressed == action
+                        region = frame[y:y+h, x:x+w]
+                        tint = np.full_like(region, PINK if down else CYAN)
+                        amount = .38 if down else .19
+                        cv2.addWeighted(region, 1-amount, tint, amount, 0, dst=region)
+                        cv2.rectangle(frame,(x+2,y+2),(x+w-2,y+h-2),WHITE if down else CYAN,3)
+                show_fullscreen(frame)
+                last_state = state
+            key = cv2.waitKeyEx(16)
+            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                return
+            if actions or key >= 0:
+                yield actions.pop(0) if actions else key
+                img, targets = render()
+                hovered = target_at_pointer()
+                last_state = None
+    finally:
+        if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
+            cv2.destroyWindow(WINDOW)
+
+
 def menu(videos):
     sel = 0
-    while True:
-        img = np.zeros((520, 900, 3), np.uint8)
-        text(img, "DANCE COACH", (40, 70), 1.4, (0, 220, 255), 3)
-        text(img, "Up/Down + Enter to choose   |   Q to quit", (40, 110), 0.6, (180, 180, 180), 1)
-        if not videos:
-            text(img, f"Put dance videos (.mp4) in: {VIDEO_DIR}", (40, 220), 0.7, (80, 80, 255))
-        for i, v in enumerate(videos[:10]):
-            col = (0, 255, 120) if i == sel else (220, 220, 220)
-            text(img, ("> " if i == sel else "  ") + os.path.basename(v), (60, 170 + i * 34), 0.8, col)
-        cv2.imshow(WINDOW, img)
-        k = cv2.waitKeyEx(50)
-        if k in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-            return None
-        if k in (2490368, 82, ord("w")): sel = max(0, sel - 1)            # up
-        if k in (2621440, 84, ord("s")): sel = min(len(videos) - 1, sel + 1)  # down
-        if k in (13, 10) and videos:
-            return videos[sel]
+    thumbs = {}
+    def render():
+        img = panel("DANCE LIBRARY")
+        targets = []
+        start = sel // 3 * 3
+        for i in range(start, min(start+3, len(videos))):
+            x = 36 + (i-start)*300
+            if i not in thumbs:
+                cap = cv2.VideoCapture(videos[i])
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)*.15))
+                ok, frame = cap.read()
+                cap.release()
+                thumbs[i] = fit_height(frame, 180) if ok else None
+            frame = thumbs[i]
+            if frame is not None:
+                width = min(280, frame.shape[1])
+                offset = (frame.shape[1]-width)//2
+                left = x+(280-width)//2
+                img[160:340,left:left+width] = frame[:,offset:offset+width]
+            cv2.rectangle(img,(x,158),(x+280,393), PINK if i == sel else CYAN, 3 if i == sel else 1)
+            name = os.path.splitext(os.path.basename(videos[i]))[0]
+            text(img, name[:23], (x+9,374), .55, WHITE, 1)
+            targets.append(((x,158,280,235), ("card",i)))
+        if videos:
+            text(img, os.path.basename(videos[sel])[:70], (36,435), .55)
+            for box,label,action in [((36,465,145,47),"Previous","prev"),((196,465,145,47),"Next","next"),((701,465,220,47),"PLAY   [ENTER]","play")]:
+                control(img,box,label,action=="play")
+                targets.append((box,action))
+        else:
+            text(img,"Add a dance video to the videos folder.",(36,260))
+        return img, targets
+    for key in screen_input(render):
+        if key in (27,ord("q")): return None
+        if not videos: continue
+        if isinstance(key, tuple): sel = key[1]
+        elif key in ("prev",81,82,65361,65362,2424832,2490368,ord("w"),ord("a")): sel=max(0,sel-1)
+        elif key in ("next",83,84,65363,65364,2555904,2621440,ord("s"),ord("d")): sel=min(len(videos)-1,sel+1)
+        elif key in ("play",13,10): return videos[sel]
 
 
 def countdown(cam, mirror, ref_frame=None, seconds=3):
-    cv2.namedWindow(WIN_VIDEO, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WIN_CAM, cv2.WINDOW_NORMAL)
-
-    cam_w = 640
-    ref_w = 640
-    if ref_frame is not None:
-        ref_w = int(ref_frame.shape[1] * (PANEL_H / ref_frame.shape[0]))
-    cv2.resizeWindow(WIN_VIDEO, ref_w, PANEL_H)
-    cv2.resizeWindow(WIN_CAM, cam_w, PANEL_H)
-    cv2.moveWindow(WIN_VIDEO, 60, 60)
-    cv2.moveWindow(WIN_CAM, 60 + ref_w + 16, 60)
-
+    fullscreen()
     end = time.time() + seconds
     while time.time() < end:
         ok, f = cam.read()
@@ -425,7 +569,7 @@ def countdown(cam, mirror, ref_frame=None, seconds=3):
         text(f, str(n), ((cw - nw) // 2, PANEL_H // 2 + 40), 3.5, (0, 255, 255), 7)
         text(f, "Step back so your whole body is visible!", (20, 40), 0.7, (255, 255, 255))
         text(f, "YOU", (15, PANEL_H - 15), 0.65, (200, 200, 200), 1)
-        cv2.imshow(WIN_CAM, f)
+        preview = f
 
         if ref_frame is not None:
             rf = fit_height(ref_frame.copy(), PANEL_H)
@@ -434,13 +578,13 @@ def countdown(cam, mirror, ref_frame=None, seconds=3):
             rtw = cv2.getTextSize(ready_txt, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0][0]
             text(rf, ready_txt, ((rw - rtw) // 2, PANEL_H // 2 + 20), 1.2, (0, 255, 255), 3)
             text(rf, "DANCER", (15, PANEL_H - 15), 0.65, (200, 200, 200), 1)
-            cv2.imshow(WIN_VIDEO, rf)
+            preview = np.hstack((rf, f))
+        show_fullscreen(preview)
 
         k = cv2.waitKey(20) & 0xFF
         if k in (27, ord("q")):
             return False
-        if cv2.getWindowProperty(WIN_CAM, cv2.WND_PROP_VISIBLE) < 1 or \
-           (ref_frame is not None and cv2.getWindowProperty(WIN_VIDEO, cv2.WND_PROP_VISIBLE) < 1):
+        if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             return False
     return True
 
@@ -579,14 +723,12 @@ def play(path, cam, mirror):
                 avg = sum(scores) / len(scores) if scores else 0
                 draw_hud(ref_img, "DANCER", avg, label, combo, shown_score)
                 draw_hud(cam_img, "YOU", avg, label, combo, shown_score)
-                cv2.imshow(WIN_VIDEO, ref_img)
-                cv2.imshow(WIN_CAM, cam_img)
+                show_fullscreen(np.hstack((ref_img, cam_img)))
 
             k = cv2.waitKey(1) & 0xFF
             if k in (27, ord("q")):
                 break
-            if cv2.getWindowProperty(WIN_VIDEO, cv2.WND_PROP_VISIBLE) < 1 or \
-               cv2.getWindowProperty(WIN_CAM, cv2.WND_PROP_VISIBLE) < 1:
+            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
     audio.stop()
@@ -595,27 +737,72 @@ def play(path, cam, mirror):
     return scores, best_combo
 
 
+# Angular pen paths in glyph coordinates, with individual metal finishes (BGR).
+RANK_GLYPHS = {
+    "S": ((32, 174, 239), [[(79,12),(39,8),(18,26),(20,48),(64,64),(66,81),(45,103),(9,96)]]),
+    "A": ((190, 187, 179), [[(7,105),(37,13),(54,6),(75,100)], [(21,69),(66,64)]]),
+    "B": ((217, 105, 37), [[(17,103),(17,18),(57,7),(76,19),(72,42),(22,59),(64,48),(78,61),(76,85),(48,102),(17,95)]]),
+    "C": ((79, 165, 44), [[(78,16),(52,7),(20,24),(15,82),(38,102),(74,87)]]),
+    "D": ((51, 43, 199), [[(17,104),(17,17),(47,8),(75,28),(75,80),(48,99),(17,93)]]),
+    "E": ((181, 63, 146), [[(76,9),(19,19),(17,99),(72,91)],[(20,59),(62,50)]]),
+    "F": ((35, 32, 30), [[(17,104),(19,19),(77,8)],[(18,59),(63,50)]]),
+}
+
+
+def draw_rank(img, letter):
+    color, strokes = RANK_GLYPHS[letter]
+    mask = np.zeros((142, 142), np.uint8)
+    # A broad diagonal chisel gives each stroke a pointed terminal.
+    nib = np.array([[-10,6],[-5,-4],[11,-9],[6,4]])
+    for stroke in strokes:
+        points = np.array([(x+25+(105-y)//10,y+16) for x,y in stroke])
+        for start, end in zip(points, points[1:]):
+            hull = cv2.convexHull(np.int32(np.vstack((start+nib,end+nib))))
+            cv2.fillConvexPoly(mask,hull,255,lineType=cv2.LINE_AA)
+    region = img[177:319,382:524]
+    rim = cv2.dilate(mask,np.ones((3,3),np.uint8)) > 90
+    region[rim] = (143,138,132)
+    alpha = mask[:,:,None]/255.
+    region[:] = region*(1-alpha)+np.array(color)*alpha
+
+
 def result_screen(scores, best_combo):
     avg = sum(scores) / len(scores) if scores else 0
     g = grade(avg)
-    while True:
-        img = np.zeros((520, 900, 3), np.uint8)
-        text(img, "RESULTS", (40, 80), 1.4, (0, 220, 255), 3)
-        text(img, f"Grade: {g}", (40, 190), 2.6, (0, 255, 120), 5)
-        text(img, f"Hit rate: {avg:.1f}%", (40, 270), 1.0)
-        text(img, f"Best combo: {best_combo}", (40, 320), 1.0)
-        text(img, "R = retry     M = menu     Q = quit", (40, 450), 0.8, (180, 180, 180), 1)
-        cv2.imshow(WINDOW, img)
-        k = cv2.waitKey(50) & 0xFF
-        if k == ord("r"):
-            cv2.destroyAllWindows()
-            return "retry"
-        if k == ord("m"):
-            cv2.destroyAllWindows()
-            return "menu"
-        if k in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-            cv2.destroyAllWindows()
-            return "quit"
+    with Image.open(os.path.join(HERE, "assets", "canvas.png")) as source:
+        canvas = ImageOps.fit(source.convert("RGB"), (960, 540))
+    img = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
+    frames, durations = [], []
+    position = (24, 24)
+    with Image.open(os.path.join(HERE, "assets", "giphy.gif")) as gif:
+        for page in ImageSequence.Iterator(gif):
+            tile = page.convert("RGBA")
+            tile.thumbnail((320, 397), Image.Resampling.LANCZOS)
+            background = canvas.crop((24, 24, 24+tile.width, 24+tile.height))
+            background.paste(tile, mask=tile.getchannel("A"))
+            frames.append(cv2.cvtColor(np.asarray(background), cv2.COLOR_RGB2BGR))
+            durations.append(max(10, page.info.get("duration", 100)))
+    ends = np.cumsum(durations)
+    started = time.monotonic()
+    def current_frame():
+        elapsed = (time.monotonic()-started)*1000 % ends[-1]
+        return int(np.searchsorted(ends, elapsed, side="right"))
+
+    text(img, "SESSION RESULTS", (388,92), 1.35, GOLD, 3)
+    text(img,"GRADE",(392,171),.7,PINK)
+    draw_rank(img, g)
+    text(img,f"HIT RATE     {avg:.1f}%",(392,351),.95,CYAN)
+    text(img,f"BEST COMBO   {best_combo}",(392,411),.95,PINK)
+    targets = []
+    for i,(action,key) in enumerate([("retry","r"),("menu","m"),("quit","q")]):
+        box = (36+i*300,465,278,47)
+        control(img,box,f"{action.upper()}   [{key.upper()}]",i==0)
+        targets.append((box,action))
+    for key in screen_input(lambda: (img,targets), (current_frame, frames, position)):
+        if key in ("retry",ord("r")): return "retry"
+        if key in ("menu",ord("m")): return "menu"
+        if key in ("quit",ord("q"),27): break
+    return "quit"
 
 
 # -------------------------------------------------------------------- main
