@@ -9,7 +9,7 @@ Run:   python dance_coach.py            (shows a menu of videos in ./videos)
 Options: --camera 1   use another webcam
          --no-mirror  don't mirror the camera (use if the dancer faces away)
 """
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageSequence
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from functools import lru_cache
 import argparse
 import math
@@ -44,6 +44,8 @@ SEGMENTS = [
     ("R thigh", 24, 26), ("R shin", 26, 28),
     ("L torso", 11, 23), ("R torso", 12, 24),
 ]
+# The result score uses arm/hand and leg rays; torso rays are display-only.
+SCORE_SEGMENT_MASK = np.arange(len(SEGMENTS)) < 8
 FULL_MARK_DEG = 8        # error below this = full points for a segment
 ZERO_MARK_DEG = 45       # error above this = 0 points
 SYNC_WINDOW_SEC = 0.50   # follow gradual tempo drift while preserving phase continuity
@@ -57,6 +59,10 @@ ALIGN_RECHECK = 6
 ALIGN_MOTION_DEG = 2.0   # allow small, slower movements to establish alignment
 
 mp_pose = mp.solutions.pose
+
+def timing_grace(delta_t, grace=0.20):
+    """Treat movement up to grace seconds after its reference time as on beat."""
+    return 0.0 <= delta_t <= grace
 
 
 # ---------------------------------------------------------------- pose maths
@@ -174,7 +180,7 @@ def compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, f
     best = None
 
     for j in range(lo, hi + 1):
-        both = user_ok & ref_valid[j]
+        both = user_ok & ref_valid[j] & SCORE_SEGMENT_MASK
         if both.sum() < 4:
             continue
         # 3D angular error in degrees for each segment
@@ -190,17 +196,20 @@ def compare(user_vecs, user_ok, ref_vecs, ref_valid, ref_weights, center, win, f
         # Rhythm Timing Sync — tight windows, harsh penalties
         delta_t = (j - center) / fps
         abs_dt = abs(delta_t)
-        if abs_dt <= 0.04:
+        if timing_grace(delta_t):
+            timing_mult = 1.0
+            tag = "ON BEAT"
+        elif abs_dt <= 0.04:
             timing_mult = 1.0
             tag = "ON BEAT"
         elif abs_dt <= 0.25:
-            timing_mult = 0.98
+            timing_mult = 0.50
             tag = "LATE" if delta_t < 0 else "EARLY"
         elif abs_dt <= 0.50:
-            timing_mult = 0.95
+            timing_mult = 0.40
             tag = "TOO LATE" if delta_t < 0 else "TOO EARLY"
         else:
-            timing_mult = 0.90
+            timing_mult = 0.10
             tag = "OFF BEAT"
 
         final_score = pose_score * timing_mult
@@ -288,15 +297,15 @@ def fit_height(img, h):
 
 
 def draw_user_skeleton(img, lm, err, matched, weights=None):
-    """Green = accurate, yellow = close, red = off.
-    Actively moving limbs are highlighted with thicker lines and glowing joints."""
+    """Draw fine pose lines with a soft neon halo and subtly lit joints."""
     h, w = img.shape[:2]
     pt = lambda i: (int(lm[i, 0] * w), int(lm[i, 1] * h))
+    glow = np.zeros_like(img)
     for k, (_, a, b) in enumerate(SEGMENTS):
         if lm[a, 2] < VIS_MIN or lm[b, 2] < VIS_MIN:
             continue
         col = (200, 200, 200)
-        thick = 4
+        joint_col = (220, 255, 255)
         if err is not None and matched[k]:
             if err[k] <= 12:
                 col = (0, 240, 0)      # Green: Nailed it
@@ -306,13 +315,14 @@ def draw_user_skeleton(img, lm, err, matched, weights=None):
                 col = (50, 50, 255)    # Red: Off
 
         if weights is not None and weights[k] > 2.0:
-            thick = 6
-            cv2.circle(img, pt(a), 7, (0, 255, 255), -1)
-            cv2.circle(img, pt(b), 7, (0, 255, 255), -1)
-
-        cv2.line(img, pt(a), pt(b), col, thick, cv2.LINE_AA)
-        cv2.circle(img, pt(a), 5, (255, 255, 255), -1)
-        cv2.circle(img, pt(b), 5, (255, 255, 255), -1)
+            joint_col = (120, 255, 255)
+        cv2.line(glow, pt(a), pt(b), col, 5, cv2.LINE_AA)
+        cv2.line(img, pt(a), pt(b), col, 2, cv2.LINE_AA)
+        for p in (pt(a), pt(b)):
+            cv2.circle(glow, p, 5, joint_col, -1, cv2.LINE_AA)
+            cv2.circle(img, p, 2, (235, 245, 255), -1, cv2.LINE_AA)
+    halo = cv2.GaussianBlur(glow, (0, 0), 4)
+    cv2.addWeighted(img, 1.0, halo, 0.38, 0, dst=img)
 
 
 def judgement(score, timing_tag="ON BEAT"):
@@ -331,6 +341,11 @@ def judgement(score, timing_tag="ON BEAT"):
     if score >= 35:
         return "BAD", (80, 120, 255)
     return "MISS", (60, 60, 255)
+
+
+def score_points(score):
+    """Award credit for hits; misses count as zero without extra deductions."""
+    return 100.0 if score >= HIT_THRESHOLD else 0.0
 
 
 def grade(avg):
@@ -361,6 +376,32 @@ def draw_hud(img, title, avg, label, combo, shown_score):
         cv2.rectangle(img, (0, 54), (meter_w, 60), LIME, -1)
     # Title badge bottom left
     text(img, title, (15, h - 14), 0.65, (200, 200, 200), 1)
+
+
+def draw_session(ref_frame, cam_frame, avg, label, combo, shown_score, progress):
+    """Keep the footage full size and place compact HUD elements at its edges."""
+    left, right = fit_height(ref_frame, PANEL_H), fit_height(cam_frame, PANEL_H)
+    img = np.hstack((left, right))
+    height, width = img.shape[:2]
+    mid = left.shape[1]
+    # Narrow translucent badges sit over the top edge, leaving most of each
+    # video unobstructed and keeping the original side-by-side presentation.
+    for x, w in ((0, mid), (mid, width-mid)):
+        cv2.rectangle(img, (x, 0), (x+w-1, 48), INK, -1)
+        cv2.rectangle(img, (x+2, 2), (x+w-3, height-3), CYAN, 2)
+    text(img, "FOLLOW THE DANCER", (14, 32), .62, WHITE, 1)
+    text(img, f"HIT {avg:04.1f}%", (mid+12, 32), .55, GOLD, 1)
+    status, color = label if label else ("", WHITE)
+    if status:
+        tw = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0][0]
+        status_x = mid + (mid-tw)//2
+        text(img, status, (status_x, 32), .68, color, 1)
+    text(img, f"{combo}x", (width-68, 32), .55, LIME, 1)
+    bar_y = height-5
+    cv2.rectangle(img, (0, bar_y), (width-1, height-1), INK, -1)
+    cv2.rectangle(img, (0, bar_y), (int((width-1)*progress), height-1), LIME, -1)
+    text(img, f"{shown_score:04.1f}", (width-65, height-13), .5, GOLD, 1)
+    return img
 
 
 # ------------------------------------------------------------------ audio
@@ -478,8 +519,11 @@ def screen_input(render, animation=None):
     try:
         last_state = None
         while True:
+            # Keep live menu previews moving even when the user is not interacting.
+            img, targets = render()
+            hovered = target_at_pointer()
             index = animation[0]() if animation else None
-            state = (hovered, pressed, index)
+            state = (hovered, pressed, index, time.monotonic() // .04)
             if state != last_state:
                 frame = img.copy()
                 if animation:
@@ -512,20 +556,23 @@ def screen_input(render, animation=None):
 
 def menu(videos):
     sel = 0
-    thumbs = {}
+    preview_caps = {}
     def render():
         img = panel("DANCE LIBRARY")
         targets = []
         start = sel // 3 * 3
         for i in range(start, min(start+3, len(videos))):
             x = 36 + (i-start)*300
-            if i not in thumbs:
-                cap = cv2.VideoCapture(videos[i])
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)*.15))
-                ok, frame = cap.read()
-                cap.release()
-                thumbs[i] = fit_height(frame, 180) if ok else None
-            frame = thumbs[i]
+            if i not in preview_caps:
+                preview_caps[i] = cv2.VideoCapture(videos[i])
+            cap = preview_caps[i]
+            ok, preview = cap.read()
+            if not ok:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, preview = cap.read()
+            frame = fit_height(preview, 180) if ok else None
+            if frame is None:
+                continue
             if frame is not None:
                 width = min(280, frame.shape[1])
                 offset = (frame.shape[1]-width)//2
@@ -670,7 +717,8 @@ def play(path, cam, mirror):
                     expected = active_weights
                     if len(user_history) >= STILL_WINDOW and expected is not None:
                         motion = body_motion(screen_lm, user_history[0])
-                        expected_active = expected > 1.6
+                        expected_active = (expected > 1.6) & SCORE_SEGMENT_MASK
+                        reference_moving = expected_active.any()
                         # Establish the choreography offset once the user actually moves.
                         # Thereafter follow it gradually, preventing frame-by-frame pose cherry-picking.
                         if motion is not None and motion >= STILL_BODY_MOTION and lag_frames is not None:
@@ -678,19 +726,20 @@ def play(path, cam, mirror):
                             lag_frames = float(np.clip(lag_frames - lag_adjustment,
                                                        -MAX_LAG_SEC * fps,
                                                        MAX_LAG_SEC * fps))
-                        if expected_active.any() and motion is not None:
-                            if motion < STILL_BODY_MOTION:
+                        if motion is not None:
+                            if reference_moving and motion < STILL_BODY_MOTION:
                                 raw = 0.0
-                            else:
+                            elif reference_moving:
                                 raw *= float(np.clip(motion / (STILL_BODY_MOTION * 2.5), 0.0, 1.0))
+                            # For a reference hold, require the user to match the pose
+                            # and remain still; arbitrary movement is not a successful hold.
                     if lag_frames is None:
                         label = ("ALIGNING", (0, 220, 255))
                         combo = 0
                     else:
-                        # Session score is hit rate: each evaluated pose earns one point
-                        # at 50% similarity, rather than averaging similarity magnitudes.
                         hit = raw >= HIT_THRESHOLD
-                        point_score = 100.0 if hit else 0.0
+                        # Each miss actively subtracts from the session score.
+                        point_score = score_points(raw)
                         scores.append(point_score)
                         shown_score += (point_score - shown_score) * 0.25
                         label = judgement(raw, tag)
@@ -700,9 +749,10 @@ def play(path, cam, mirror):
                     if lag_frames is None:
                         label = ("ALIGNING", (0, 220, 255))
                     else:
-                        scores.append(0.0)
+                        miss_score = score_points(0.0)
+                        scores.append(miss_score)
                         combo = 0
-                        shown_score += (0.0 - shown_score) * 0.25
+                        shown_score += (miss_score - shown_score) * 0.25
                         label = judgement(0.0)
                 # Keep showing detected landmarks while phrase alignment is being established.
                 draw_user_skeleton(cam_img, screen_lm, err, matched, active_weights)
@@ -711,19 +761,20 @@ def play(path, cam, mirror):
                 if screen_lm is not None and lag_frames is None:
                     label = ("ALIGNING", (0, 220, 255))
                 else:
-                    scores.append(0.0)
+                    miss_score = score_points(0.0)
+                    scores.append(miss_score)
                     combo = 0
-                    shown_score += (0.0 - shown_score) * 0.25
+                    shown_score += (miss_score - shown_score) * 0.25
                     label = judgement(0.0)
                 if screen_lm is None:
                     text(cam_img, "No body detected - step back", (20, 95), 0.7, (80, 80, 255))
 
             if ref_frame is not None:
                 ref_img = fit_height(ref_frame, PANEL_H)
-                avg = sum(scores) / len(scores) if scores else 0
-                draw_hud(ref_img, "DANCER", avg, label, combo, shown_score)
-                draw_hud(cam_img, "YOU", avg, label, combo, shown_score)
-                show_fullscreen(np.hstack((ref_img, cam_img)))
+                avg = max(0.0, sum(scores) / len(scores)) if scores else 0
+                duration = max(1, len(ref_vecs))
+                show_fullscreen(draw_session(ref_img, cam_img, avg, label, combo,
+                                             shown_score, ref_pos / duration))
 
             k = cv2.waitKey(1) & 0xFF
             if k in (27, ord("q")):
@@ -767,21 +818,31 @@ def draw_rank(img, letter):
 
 
 def result_screen(scores, best_combo):
-    avg = sum(scores) / len(scores) if scores else 0
+    avg = max(0.0, sum(scores) / len(scores)) if scores else 0
     g = grade(avg)
-    with Image.open(os.path.join(HERE, "assets", "canvas.png")) as source:
+    with Image.open(os.path.join(HERE, "assets", "result-background.png")) as source:
         canvas = ImageOps.fit(source.convert("RGB"), (960, 540))
     img = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
     frames, durations = [], []
     position = (24, 24)
+    card_size = (320, 397)
     with Image.open(os.path.join(HERE, "assets", "giphy.gif")) as gif:
-        for page in ImageSequence.Iterator(gif):
-            tile = page.convert("RGBA")
-            tile.thumbnail((320, 397), Image.Resampling.LANCZOS)
-            background = canvas.crop((24, 24, 24+tile.width, 24+tile.height))
-            background.paste(tile, mask=tile.getchannel("A"))
-            frames.append(cv2.cvtColor(np.asarray(background), cv2.COLOR_RGB2BGR))
-            durations.append(max(10, page.info.get("duration", 100)))
+        for frame_index in range(gif.n_frames):
+            gif.seek(frame_index)
+            tile = gif.convert("RGBA").copy()
+            tile.thumbnail((270, 347), Image.Resampling.LANCZOS)
+
+            # Keep the transparent animation on its own card so the art in the
+            # background cannot show through and look like a second, ghosted GIF.
+            card = Image.new("RGBA", card_size, (25, 19, 24, 255))
+            ImageDraw.Draw(card).rounded_rectangle(
+                (2, 2, card_size[0]-3, card_size[1]-3),
+                radius=22, fill=(25, 19, 24, 255), outline=(235, 222, 35, 255), width=4,
+            )
+            card.alpha_composite(tile, ((card_size[0]-tile.width)//2,
+                                        (card_size[1]-tile.height)//2))
+            frames.append(cv2.cvtColor(np.asarray(card.convert("RGB")), cv2.COLOR_RGB2BGR))
+            durations.append(max(10, gif.info.get("duration", 100)))
     ends = np.cumsum(durations)
     started = time.monotonic()
     def current_frame():
