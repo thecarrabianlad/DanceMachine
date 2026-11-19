@@ -304,11 +304,11 @@ def fit_box(img, max_w, max_h):
 
 
 def fancy_text(img, value, baseline, size, color):
-    font = ImageFont.truetype(os.path.join(HERE, "assets", "fonts", "rocketpop.otf"), size)
+    font = ImageFont.truetype(os.path.join(HERE, "assets", "fonts", "ThunderboldDemo.otf"), size)
     rgb = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(rgb)
     draw.text(baseline, value, font=font, fill=tuple(color[::-1]), anchor="ls",
-              stroke_width=max(1, size//24), stroke_fill=(22, 10, 26))
+              stroke_width=max(3, size//8), stroke_fill=(10, 8, 5))
     img[:] = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
@@ -480,10 +480,19 @@ def blit_art(img, art, box, stretch=False):
 
 
 def panel(title):
-    img = np.full((540, 960, 3), INK, np.uint8)
+    img = menu_background().copy()
     blit_art(img, graffiti_asset("dance-machine-logo.png"), (620, 4, 330, 66))
     blit_art(img, graffiti_asset("menu-icon.png"), (20, 15, 117, 49))
     return img
+
+
+@lru_cache(maxsize=1)
+def menu_background():
+    path = os.path.join(HERE, "assets", "menu-background.png")
+    source = cv2.imread(path, cv2.IMREAD_COLOR)
+    if source is None:
+        return np.full((540, 960, 3), INK, np.uint8)
+    return cv2.resize(source, (960, 540), interpolation=cv2.INTER_AREA)
 
 
 @lru_cache(maxsize=32)
@@ -860,33 +869,9 @@ def play(path, cam, mirror):
     return scores, best_combo
 
 
-# Angular pen paths in glyph coordinates, with individual metal finishes (BGR).
-RANK_GLYPHS = {
-    "S": ((32, 174, 239), [[(79,12),(39,8),(18,26),(20,48),(64,64),(66,81),(45,103),(9,96)]]),
-    "A": ((190, 187, 179), [[(7,105),(37,13),(54,6),(75,100)], [(21,69),(66,64)]]),
-    "B": ((217, 105, 37), [[(17,103),(17,18),(57,7),(76,19),(72,42),(22,59),(64,48),(78,61),(76,85),(48,102),(17,95)]]),
-    "C": ((79, 165, 44), [[(78,16),(52,7),(20,24),(15,82),(38,102),(74,87)]]),
-    "D": ((51, 43, 199), [[(17,104),(17,17),(47,8),(75,28),(75,80),(48,99),(17,93)]]),
-    "E": ((181, 63, 146), [[(76,9),(19,19),(17,99),(72,91)],[(20,59),(62,50)]]),
-    "F": ((35, 32, 30), [[(17,104),(19,19),(77,8)],[(18,59),(63,50)]]),
-}
-
-
-def draw_rank(img, letter):
-    color, strokes = RANK_GLYPHS[letter]
-    mask = np.zeros((142, 142), np.uint8)
-    # A broad diagonal chisel gives each stroke a pointed terminal.
-    nib = np.array([[-10,6],[-5,-4],[11,-9],[6,4]])
-    for stroke in strokes:
-        points = np.array([(x+25+(105-y)//10,y+16) for x,y in stroke])
-        for start, end in zip(points, points[1:]):
-            hull = cv2.convexHull(np.int32(np.vstack((start+nib,end+nib))))
-            cv2.fillConvexPoly(mask,hull,255,lineType=cv2.LINE_AA)
-    region = img[207:349,382:524]
-    rim = cv2.dilate(mask,np.ones((3,3),np.uint8)) > 90
-    region[rim] = (143,138,132)
-    alpha = mask[:,:,None]/255.
-    region[:] = region*(1-alpha)+np.array(color)*alpha
+def draw_rank(img, letter, box=(520, 165, 145, 140)):
+    art = graffiti_asset(f"grade-{letter}.png")
+    blit_art(img, art, box)
 
 
 def result_screen(scores, best_combo):
@@ -922,11 +907,11 @@ def result_screen(scores, best_combo):
         elapsed = (time.monotonic()-started)*1000 % ends[-1]
         return int(np.searchsorted(ends, elapsed, side="right"))
 
-    fancy_text(img, "SESSION RESULTS", (388, 122), 46, GOLD)
-    fancy_text(img,"GRADE",(392,201),28,PINK)
+    fancy_text(img, "SESSION RESULTS", (388, 120), 36, CYAN)
+    fancy_text(img, "GRADE", (392, 234), 24, GOLD)
     draw_rank(img, g)
-    fancy_text(img,f"HIT RATE     {avg:.1f}%",(392,381),34,CYAN)
-    fancy_text(img,f"BEST COMBO   {best_combo}",(392,441),34,PINK)
+    fancy_text(img, f"HIT RATE     {avg:.1f}%", (392, 326), 27, WHITE)
+    fancy_text(img, f"BEST COMBO   {best_combo}", (392, 378), 27, CYAN)
     targets = []
     for i,(action,key) in enumerate([("retry","r"),("menu","m"),("quit","q")]):
         x = 36+i*300
