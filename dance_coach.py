@@ -618,12 +618,31 @@ def menu(videos):
         for i in range(start, min(start+3, len(videos))):
             x = 24 + (i-start)*312
             if i not in preview_caps:
-                preview_caps[i] = cv2.VideoCapture(videos[i])
-            cap = preview_caps[i]
-            ok, preview = cap.read()
-            if not ok:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                cap = cv2.VideoCapture(videos[i])
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                preview_caps[i] = {
+                    "cap": cap,
+                    "fps": fps if math.isfinite(fps) and fps > 0 else 30.0,
+                    "frame_count": max(1, frame_count),
+                    "started": time.monotonic(),
+                    "frame_no": -1,
+                    "frame": None,
+                }
+            preview_state = preview_caps[i]
+            # Select the frame from elapsed wall time instead of advancing one
+            # frame per menu redraw, which can run slower than the source video.
+            target_frame = int((time.monotonic() - preview_state["started"])
+                               * preview_state["fps"]) % preview_state["frame_count"]
+            if target_frame != preview_state["frame_no"]:
+                cap = preview_state["cap"]
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
                 ok, preview = cap.read()
+                preview_state["frame_no"] = target_frame
+                preview_state["frame"] = preview if ok else None
+            else:
+                preview = preview_state["frame"]
+                ok = preview is not None
             frame = fit_box(preview, 270, 205) if ok else None
             if frame is None:
                 continue
