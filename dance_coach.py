@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VIDEO_DIR = os.path.join(HERE, "videos")
 CACHE_DIR = os.path.join(HERE, ".pose_cache")
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".webm")
-PANEL_H = 480            # height of each panel (reference / camera)
+PANEL_H = 720            # gameplay panel height; retain HD detail on full screens
 WINDOW = "Dance Coach"
 WIN_VIDEO = "Dance Coach - Video"
 WIN_CAM = "Dance Coach - Camera"
@@ -296,6 +296,22 @@ def fit_height(img, h):
     return cv2.resize(img, (int(img.shape[1] * s), h))
 
 
+def fit_box(img, max_w, max_h):
+    scale = min(max_w / img.shape[1], max_h / img.shape[0])
+    return cv2.resize(img, (max(1, int(img.shape[1]*scale)),
+                             max(1, int(img.shape[0]*scale))),
+                      interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4)
+
+
+def fancy_text(img, value, baseline, size, color):
+    font = ImageFont.truetype(os.path.join(HERE, "assets", "fonts", "rocketpop.otf"), size)
+    rgb = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(rgb)
+    draw.text(baseline, value, font=font, fill=tuple(color[::-1]), anchor="ls",
+              stroke_width=max(1, size//24), stroke_fill=(22, 10, 26))
+    img[:] = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
+
+
 def draw_user_skeleton(img, lm, err, matched, weights=None):
     """Draw fine pose lines with a soft neon halo and subtly lit joints."""
     h, w = img.shape[:2]
@@ -389,7 +405,7 @@ def draw_session(ref_frame, cam_frame, avg, label, combo, shown_score, progress)
     for x, w in ((0, mid), (mid, width-mid)):
         cv2.rectangle(img, (x, 0), (x+w-1, 48), INK, -1)
         cv2.rectangle(img, (x+2, 2), (x+w-3, height-3), CYAN, 2)
-    text(img, "FOLLOW THE DANCER", (14, 32), .62, WHITE, 1)
+    blit_art(img, graffiti_asset("dance-machine-logo.png"), (12, 4, 190, 40))
     text(img, f"HIT {avg:04.1f}%", (mid+12, 32), .55, GOLD, 1)
     status, color = label if label else ("", WHITE)
     if status:
@@ -429,22 +445,50 @@ GOLD = (38, 213, 255)
 ORANGE = (65, 114, 255)
 BUTTON_COLORS = {"previous": CYAN, "next": PINK, "play": LIME,
                  "retry": GOLD, "menu": CYAN, "quit": ORANGE}
+GRAFFITI_ASSETS = {
+    "previous": "previous-graffiti.png",
+    "next": "next-graffiti.png",
+    "play": "play-graffiti.png",
+    "retry": "retry-graffiti.png",
+    "menu": "menu-graffiti.png",
+    "quit": "quit-graffiti.png",
+}
+
+
+@lru_cache(maxsize=8)
+def graffiti_asset(name):
+    return cv2.imread(os.path.join(HERE, "assets", name), cv2.IMREAD_UNCHANGED)
+
+
+def blit_art(img, art, box, stretch=False):
+    """Contain and alpha-composite a transparent graffiti graphic in a box."""
+    x, y, w, h = box
+    if art is None or art.shape[2] != 4:
+        return
+    if stretch:
+        nw, nh = w, h
+    else:
+        scale = min(w/art.shape[1], h/art.shape[0])
+        nw, nh = max(1, int(art.shape[1]*scale)), max(1, int(art.shape[0]*scale))
+        x += (w-nw)//2
+        y += (h-nh)//2
+    interp = cv2.INTER_AREA if nw < art.shape[1] or nh < art.shape[0] else cv2.INTER_LANCZOS4
+    tile = cv2.resize(art, (nw, nh), interpolation=interp)
+    rgb, alpha = tile[:, :, :3].astype(np.float32), tile[:, :, 3:4].astype(np.float32)/255
+    region = img[y:y+nh, x:x+nw]
+    region[:] = (rgb*alpha + region.astype(np.float32)*(1-alpha)).astype(np.uint8)
 
 
 def panel(title):
     img = np.full((540, 960, 3), INK, np.uint8)
-    for offset, color in [(0, PINK), (32, GOLD), (64, LIME)]:
-        x = 808 + offset
-        cv2.fillConvexPoly(img, np.int32([(x, 0), (x+23, 0), (x-10, 58), (x-33, 58)]), color)
-    text(img, "DANCE COACH", (36, 36), .55, CYAN)
-    text(img, title, (32, 98), 1.65, GOLD, 3)
-    cv2.line(img, (35, 113), (923, 113), PINK, 2)
+    blit_art(img, graffiti_asset("dance-machine-logo.png"), (620, 4, 330, 66))
+    blit_art(img, graffiti_asset("menu-icon.png"), (20, 15, 117, 49))
     return img
 
 
-@lru_cache(maxsize=24)
-def button_art(label, width, height):
-    font_path = os.path.join(HERE, "assets", "fonts", "Drobix.ttf")
+@lru_cache(maxsize=32)
+def button_art(label, width, height, font_path=None):
+    font_path = font_path or os.path.join(HERE, "assets", "fonts", "Drobix.ttf")
     mask = Image.new("L", (width, height))
     draw = ImageDraw.Draw(mask)
     for size in range(40, 9, -1):
@@ -458,12 +502,18 @@ def button_art(label, width, height):
     return alpha
 
 
-def control(img, box, label, active=False):
+def control(img, box, label, active=False, font_path=None):
     x, y, w, h = box
+    asset_key = label.split()[0].lower()
+    if asset_key in GRAFFITI_ASSETS:
+        art = graffiti_asset(GRAFFITI_ASSETS[asset_key])
+        if art is not None:
+            blit_art(img, art, (x, y, w, h))
+            return
     paint = BUTTON_COLORS[label.split()[0].lower()]
     cv2.rectangle(img, (x,y), (x+w,y+h), paint, -1)
     cv2.rectangle(img, (x,y), (x+w,y+h), WHITE if active else INK, 2)
-    alpha = button_art(label, w, h)
+    alpha = button_art(label, w, h, font_path)
     region = img[y:y+h,x:x+w]
     shadow = np.roll(alpha, (2,2), axis=(0,1))
     region[:] = region*(1-shadow)+np.array(WHITE)*shadow
@@ -483,7 +533,9 @@ def fullscreen():
 
 
 def show_fullscreen(frame):
-    cv2.imshow(WINDOW, cv2.resize(frame, display_size))
+    # Lanczos keeps fine UI edges and video detail crisp when fitting the
+    # logical interface to a high-DPI display.
+    cv2.imshow(WINDOW, cv2.resize(frame, display_size, interpolation=cv2.INTER_LANCZOS4))
     return display_size
 
 
@@ -535,10 +587,12 @@ def screen_input(render, animation=None):
                     if hovered == action:
                         down = pressed == action
                         region = frame[y:y+h, x:x+w]
-                        tint = np.full_like(region, PINK if down else CYAN)
-                        amount = .38 if down else .19
+                        # A clear, translucent blue rectangle marks every
+                        # clickable tile and control under the pointer.
+                        tint = np.full_like(region, (255, 92, 24))
+                        amount = .46 if down else .28
                         cv2.addWeighted(region, 1-amount, tint, amount, 0, dst=region)
-                        cv2.rectangle(frame,(x+2,y+2),(x+w-2,y+h-2),WHITE if down else CYAN,3)
+                        cv2.rectangle(frame,(x+2,y+2),(x+w-2,y+h-2),WHITE if down else (255, 92, 24),3)
                 show_fullscreen(frame)
                 last_state = state
             key = cv2.waitKeyEx(16)
@@ -562,7 +616,7 @@ def menu(videos):
         targets = []
         start = sel // 3 * 3
         for i in range(start, min(start+3, len(videos))):
-            x = 36 + (i-start)*300
+            x = 24 + (i-start)*312
             if i not in preview_caps:
                 preview_caps[i] = cv2.VideoCapture(videos[i])
             cap = preview_caps[i]
@@ -570,21 +624,20 @@ def menu(videos):
             if not ok:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ok, preview = cap.read()
-            frame = fit_height(preview, 180) if ok else None
+            frame = fit_box(preview, 270, 205) if ok else None
             if frame is None:
                 continue
-            if frame is not None:
-                width = min(280, frame.shape[1])
-                offset = (frame.shape[1]-width)//2
-                left = x+(280-width)//2
-                img[160:340,left:left+width] = frame[:,offset:offset+width]
-            cv2.rectangle(img,(x,158),(x+280,393), PINK if i == sel else CYAN, 3 if i == sel else 1)
+            px = x+(300-frame.shape[1])//2
+            py = 138+(250-frame.shape[0])//2
+            img[py:py+frame.shape[0],px:px+frame.shape[1]] = frame
             name = os.path.splitext(os.path.basename(videos[i]))[0]
-            text(img, name[:23], (x+9,374), .55, WHITE, 1)
-            targets.append(((x,158,280,235), ("card",i)))
+            text(img, name[:27], (x+8,396), .46, GOLD, 1)
+            card = (x,132,300,280)
+            if i == sel:
+                cv2.rectangle(img, (x+2,134), (x+298,410), (255, 92, 24), 3)
+            targets.append((card, ("card",i)))
         if videos:
-            text(img, os.path.basename(videos[sel])[:70], (36,435), .55)
-            for box,label,action in [((36,465,145,47),"Previous","prev"),((196,465,145,47),"Next","next"),((701,465,220,47),"PLAY   [ENTER]","play")]:
+            for box,label,action in [((24,452,200,68),"Previous","prev"),((244,463,155,52),"Next","next"),((700,452,232,68),"PLAY   [ENTER]","play")]:
                 control(img,box,label,action=="play")
                 targets.append((box,action))
         else:
@@ -593,7 +646,7 @@ def menu(videos):
     for key in screen_input(render):
         if key in (27,ord("q")): return None
         if not videos: continue
-        if isinstance(key, tuple): sel = key[1]
+        if isinstance(key, tuple) and key[0] == "card": return videos[key[1]]
         elif key in ("prev",81,82,65361,65362,2424832,2490368,ord("w"),ord("a")): sel=max(0,sel-1)
         elif key in ("next",83,84,65363,65364,2555904,2621440,ord("s"),ord("d")): sel=min(len(videos)-1,sel+1)
         elif key in ("play",13,10): return videos[sel]
@@ -810,7 +863,7 @@ def draw_rank(img, letter):
         for start, end in zip(points, points[1:]):
             hull = cv2.convexHull(np.int32(np.vstack((start+nib,end+nib))))
             cv2.fillConvexPoly(mask,hull,255,lineType=cv2.LINE_AA)
-    region = img[177:319,382:524]
+    region = img[207:349,382:524]
     rim = cv2.dilate(mask,np.ones((3,3),np.uint8)) > 90
     region[rim] = (143,138,132)
     alpha = mask[:,:,None]/255.
@@ -823,6 +876,7 @@ def result_screen(scores, best_combo):
     with Image.open(os.path.join(HERE, "assets", "result-background.png")) as source:
         canvas = ImageOps.fit(source.convert("RGB"), (960, 540))
     img = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
+    blit_art(img, graffiti_asset("dance-machine-logo.png"), (630, 10, 300, 58))
     frames, durations = [], []
     position = (24, 24)
     card_size = (320, 397)
@@ -849,15 +903,18 @@ def result_screen(scores, best_combo):
         elapsed = (time.monotonic()-started)*1000 % ends[-1]
         return int(np.searchsorted(ends, elapsed, side="right"))
 
-    text(img, "SESSION RESULTS", (388,92), 1.35, GOLD, 3)
-    text(img,"GRADE",(392,171),.7,PINK)
+    fancy_text(img, "SESSION RESULTS", (388, 122), 46, GOLD)
+    fancy_text(img,"GRADE",(392,201),28,PINK)
     draw_rank(img, g)
-    text(img,f"HIT RATE     {avg:.1f}%",(392,351),.95,CYAN)
-    text(img,f"BEST COMBO   {best_combo}",(392,411),.95,PINK)
+    fancy_text(img,f"HIT RATE     {avg:.1f}%",(392,381),34,CYAN)
+    fancy_text(img,f"BEST COMBO   {best_combo}",(392,441),34,PINK)
     targets = []
     for i,(action,key) in enumerate([("retry","r"),("menu","m"),("quit","q")]):
-        box = (36+i*300,465,278,47)
+        x = 36+i*300
+        box = (x,448,278,76)
         control(img,box,f"{action.upper()}   [{key.upper()}]",i==0)
+        cv2.putText(img, f"[{key.upper()}]", (x+126, 535),
+                    cv2.FONT_HERSHEY_SIMPLEX, .48, WHITE, 1, cv2.LINE_AA)
         targets.append((box,action))
     for key in screen_input(lambda: (img,targets), (current_frame, frames, position)):
         if key in ("retry",ord("r")): return "retry"
@@ -878,8 +935,8 @@ def main():
     cam = cv2.VideoCapture(args.camera)
     if not cam.isOpened():
         sys.exit("Cannot open the webcam. Try --camera 1")
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     os.makedirs(VIDEO_DIR, exist_ok=True)
     path = args.video

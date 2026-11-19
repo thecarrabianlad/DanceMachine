@@ -13,3 +13,4 @@ __pycache__/
 
 # Generated files
 *.log
+.pose_cache/
